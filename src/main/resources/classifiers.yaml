@@ -1,0 +1,38 @@
+# resources/classifiers.yaml
+name:
+  # === Gate Thresholds ===
+  maxAtSymbolDensity: 0.01
+  minLetterPercentage: 0.70
+  maxSymbolPercentage: 0.15
+  minMeanLength: 3.0
+  maxEntropy: 4.8
+  minTitleCaseRate: 0.60
+  minUniqueRatio: 0.50  # Reject low uniqueness (countries, states)
+  maxDictionaryCoverage: 0.70  # Reject high coverage (locations)
+
+  # === Scoring Weights (must sum to ~1.0) ===
+  patternWeight: 0.50      # Title case rate
+  letterWeight: 0.25       # Letter percentage
+  symbolWeight: 0.08       # Symbol percentage (low = good)
+  wordCountWeight: 0.10    # Average words (1-3 = good)
+  lengthWeight: 0.05       # Length variance
+  entropyWeight: 0.02      # Entropy (moderate = good)
+
+  email:
+    # === Gate Thresholds ===
+    maxAtSymbolDensity: 0.02
+    minLetterPercentage: 0.87
+    maxSymbolPercentage: 0.15
+    minMeanLength: 23
+    maxEntropy: 4.8
+    minTitleCaseRate: 0.60
+    minUniqueRatio: 0.50  # Reject low uniqueness (countries, states)
+    maxDictionaryCoverage: 0.70  # Reject high coverage (locations)
+
+    # === Scoring Weights (must sum to ~1.0) ===
+    patternWeight: 0.50      # Title case rate
+    letterWeight: 0.25       # Letter percentage
+    symbolWeight: 0.08       # Symbol percentage (low = good)
+    wordCountWeight: 0.10    # Average words (1-3 = good)
+    lengthWeight: 0.05       # Length variance
+    entropyWeight: 0.02      # Entropy (moderate = good)
