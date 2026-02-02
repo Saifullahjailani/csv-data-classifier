@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import selene.lib.category.CSVCategorizer;
 import selene.lib.category.manual.ColumnNameProcessor;
 import selene.lib.category.type.ClassificationResult;
+import selene.lib.elastic.ElasticsearchMappingGenerator;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -77,6 +78,11 @@ public class Main {
             case "csv":
                 output = formatAsCsv(classificationResults);
                 break;
+            case "es-mapping":
+            case "elasticsearch":
+            case "elastic":
+                output = formatAsElasticsearchMapping(classificationResults, options);
+                break;
             case "table":
             default:
                 output = formatAsTable(classificationResults, categorizer, options.verbose);
@@ -135,6 +141,34 @@ public class Main {
         }
 
         return sb.toString();
+    }
+
+    private static String formatAsElasticsearchMapping(List<ClassificationResult> results, CliOptions options) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+            mapper.enable(SerializationFeature.INDENT_OUTPUT);
+
+            // Configure mapping options
+            ElasticsearchMappingGenerator.MappingOptions mappingOptions =
+                ElasticsearchMappingGenerator.MappingOptions.defaults()
+                    .withShards(options.esShards)
+                    .withReplicas(options.esReplicas)
+                    .withDynamicMapping(options.esDynamic)
+                    .withMetadata(options.esIncludeMetadata);
+
+            // Generate mapping
+            ElasticsearchMappingGenerator generator = new ElasticsearchMappingGenerator(
+                options.esIndexName,
+                results,
+                mappingOptions
+            );
+
+            Map<String, Object> mapping = generator.generateMapping();
+
+            return mapper.writeValueAsString(mapping) + "\n";
+        } catch (Exception e) {
+            return "{\"error\": \"" + e.getMessage() + "\"}\n";
+        }
     }
 
     private static String formatAsTable(List<ClassificationResult> results, CSVCategorizer categorizer, boolean verbose) {
@@ -211,12 +245,43 @@ public class Main {
                         options.outputFile = args[++i];
                     }
                     break;
+                case "--index-name":
+                case "-i":
+                    if (i + 1 < args.length) {
+                        options.esIndexName = args[++i];
+                    }
+                    break;
+                case "--shards":
+                    if (i + 1 < args.length) {
+                        options.esShards = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--replicas":
+                    if (i + 1 < args.length) {
+                        options.esReplicas = Integer.parseInt(args[++i]);
+                    }
+                    break;
+                case "--dynamic":
+                    options.esDynamic = true;
+                    break;
+                case "--no-metadata":
+                    options.esIncludeMetadata = false;
+                    break;
                 default:
                     if (!arg.startsWith("-") && options.inputFile == null) {
                         options.inputFile = arg;
                     }
                     break;
             }
+        }
+
+        // Derive index name from input file if not specified
+        if (options.esIndexName == null && options.inputFile != null) {
+            String fileName = Path.of(options.inputFile).getFileName().toString();
+            options.esIndexName = fileName
+                .replaceAll("\\.csv$", "")
+                .toLowerCase()
+                .replaceAll("[^a-z0-9]", "_");
         }
 
         return options;
@@ -236,8 +301,15 @@ public class Main {
                     -h, --help              Show this help message
                     -v, --version           Show version information
                     --verbose               Enable verbose output
-                    -f, --format <FORMAT>   Output format: table (default), json, csv
+                    -f, --format <FORMAT>   Output format: table (default), json, csv, es-mapping
                     -o, --output <FILE>     Write output to file instead of stdout
+
+                ELASTICSEARCH MAPPING OPTIONS (use with -f es-mapping):
+                    -i, --index-name <NAME> Elasticsearch index name (default: derived from filename)
+                    --shards <N>            Number of primary shards (default: 1)
+                    --replicas <N>          Number of replicas (default: 1)
+                    --dynamic               Enable dynamic mapping (default: strict)
+                    --no-metadata           Don't include category metadata in mappings
 
                 EXAMPLES:
                     csv-classifier data.csv
@@ -245,15 +317,29 @@ public class Main {
                     csv-classifier -f json -o results.json data.csv
                     csv-classifier --verbose -f csv data.csv > report.csv
 
+                    # Generate Elasticsearch mapping
+                    csv-classifier -f es-mapping data.csv
+                    csv-classifier -f es-mapping -i my_index --shards 3 --replicas 2 data.csv
+                    csv-classifier -f es-mapping -o mapping.json data.csv
+
                 OUTPUT FORMATS:
-                    table   - Human-readable ASCII table (default)
-                    json    - JSON format with full metadata
-                    csv     - CSV format for further processing
+                    table       - Human-readable ASCII table (default)
+                    json        - JSON format with full metadata
+                    csv         - CSV format for further processing
+                    es-mapping  - Elasticsearch index mapping with analyzers
 
                 DETECTED CATEGORIES:
                     - PII: email, phone, ssn, credit-card, name, address, etc.
                     - Crypto: hash, bitcoin, ethereum, and 50+ blockchain addresses
                     - Custom: gender, job-title, index, id
+
+                ELASTICSEARCH ANALYZERS (auto-configured based on detected categories):
+                    - email_analyzer      : For email addresses with domain extraction
+                    - name_analyzer       : For person names with autocomplete support
+                    - phone_analyzer      : For phone numbers (digits only)
+                    - address_analyzer    : For street addresses with synonyms
+                    - pii_analyzer        : For sensitive data (SSN, credit cards)
+                    - autocomplete_analyzer: For search-as-you-type fields
 
                 ELASTICSEARCH TYPES:
                     TEXT, KEYWORD, INTEGER, LONG, FLOAT, DOUBLE, BOOLEAN,
@@ -270,5 +356,12 @@ public class Main {
         boolean showHelp = false;
         boolean showVersion = false;
         boolean verbose = false;
+
+        // Elasticsearch mapping options
+        String esIndexName;
+        int esShards = 1;
+        int esReplicas = 1;
+        boolean esDynamic = false;
+        boolean esIncludeMetadata = true;
     }
 }
