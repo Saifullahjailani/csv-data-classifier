@@ -20,6 +20,7 @@ import java.util.stream.StreamSupport;
 
 public class CSVCategorizer {
     private final Table csv;
+    private static final ColumnNameProcessor columnNameProcessor = new ColumnNameProcessor();
     public static PIIDetector detector = new PIIDetector();
     private static final int SAMPLE_SIZE = 1000;
     private final Random random = new Random();
@@ -27,8 +28,8 @@ public class CSVCategorizer {
     public static double GENDER_COUNT_THRESHOLD = 0.75;
     public static double JOB_TITLE_COUNT_THRESHOLD = 0.75;
 
-    public final Map<String, ColumnNameProcessor.ColumnMetaData> columnsMetaData = new HashMap<>();
-
+    // Maps original column name -> metadata (with clean name, type, categories)
+    public final Map<String, ColumnNameProcessor.ColumnMetaData> columnsMetaData = new LinkedHashMap<>();
 
 
     public CSVCategorizer (String pathString) throws RuntimeException {
@@ -42,51 +43,58 @@ public class CSVCategorizer {
         }
         this.csv = readCsv(pathString);
 
-        for(String columnName : csv.columnNames()){
-            columnsMetaData.put(columnName,
-                    ColumnNameProcessor.ColumnMetaData
-                            .builder()
-                            .columnName(columnName)
-                            .category(new ArrayList<>())
-                            .elasticType(ElasticTypes.UNKNOWN)
-                            .build());
+        // Parse column names for manual type/category annotations
+        for(String originalColumnName : csv.columnNames()){
+            ColumnNameProcessor.ColumnMetaData parsed = columnNameProcessor.getMetaData(originalColumnName);
+            columnsMetaData.put(originalColumnName, parsed);
         }
-
     }
 
     public Map<String, ColumnNameProcessor.ColumnMetaData> categorize(){
-        // Check if any of the columns is index
         for(int i = 0 ; i < csv.columnCount(); i ++){
             StringColumn column = csv.stringColumn(i);
-            var obj = columnsMetaData.get(column.name());
+            var meta = columnsMetaData.get(column.name());
 
-            if(isIndex(column)){
-                obj.setElasticType(ElasticTypes.INTEGER);
-                obj.addCategory(CustomCategories.INDEX.getType());
+            // Check if column has manual annotations - skip detection if fully specified
+            boolean hasManualType = meta.getElasticType() != null && meta.getElasticType() != ElasticTypes.UNKNOWN;
+            boolean hasManualCategories = meta.getCategory() != null && !meta.getCategory().isEmpty();
+
+            // If both type and categories are manually specified, skip detection entirely
+            if (hasManualType && hasManualCategories) {
+                continue;
             }
 
-            StringColumn sampledColumn = sampleColumn(column);
-            Set<String> preCategories = new HashSet<>(prePIIAnalysis(sampledColumn));
-
-            if(preCategories.isEmpty()){
-                String maxKey = detector.getFrequency(sampledColumn).entrySet().stream()
-                        .max(Map.Entry.comparingByValue())
-                        .map(Map.Entry::getKey)
-                        .orElse("");
-                if(!maxKey.isBlank()){
-                    preCategories.add(maxKey.toLowerCase());
+            // Only detect categories if not manually specified
+            if (!hasManualCategories) {
+                // Check if column is an index
+                if(isIndex(column)){
+                    meta.setElasticType(ElasticTypes.INTEGER);
+                    meta.addCategory(CustomCategories.INDEX.getType());
                 }
-            }
 
-            preCategories.forEach(obj::addCategory);
+                StringColumn sampledColumn = sampleColumn(column);
+                Set<String> detectedCategories = new HashSet<>(prePIIAnalysis(sampledColumn));
 
-            // Check if all values are unique (potential ID column)
-            if(sampledColumn.countMissing() == 0 && sampledColumn.countUnique() == sampledColumn.size()){
-                obj.addCategory(CustomCategories.ID.getType());
+                if(detectedCategories.isEmpty()){
+                    String maxKey = detector.getFrequency(sampledColumn).entrySet().stream()
+                            .max(Map.Entry.comparingByValue())
+                            .map(Map.Entry::getKey)
+                            .orElse("");
+                    if(!maxKey.isBlank()){
+                        detectedCategories.add(maxKey.toLowerCase());
+                    }
+                }
+
+                detectedCategories.forEach(meta::addCategory);
+
+                // Check if all values are unique (potential ID column)
+                if(sampledColumn.countMissing() == 0 && sampledColumn.countUnique() == sampledColumn.size()){
+                    meta.addCategory(CustomCategories.ID.getType());
+                }
             }
         }
 
-        // Infer elastic types after categorization
+        // Infer elastic types for columns without manual type
         inferElasticTypes();
 
         return columnsMetaData;
@@ -95,10 +103,10 @@ public class CSVCategorizer {
     public void inferElasticTypes(){
         for(int i = 0; i < csv.columnCount(); i++){
             StringColumn column = csv.stringColumn(i);
-            var obj = columnsMetaData.get(column.name());
+            var meta = columnsMetaData.get(column.name());
 
-            // Skip if type already set (e.g., index columns)
-            if(obj.getElasticType() != null && obj.getElasticType() != ElasticTypes.UNKNOWN){
+            // Skip if type already set (manually or from index detection)
+            if(meta.getElasticType() != null && meta.getElasticType() != ElasticTypes.UNKNOWN){
                 continue;
             }
 
@@ -108,11 +116,11 @@ public class CSVCategorizer {
                     .collect(Collectors.toList());
 
             ElasticTypes inferredType = TypeDetector.inferColumnType(
-                    obj.getCategory(),
+                    meta.getCategory(),
                     columnValues
             );
 
-            obj.setElasticType(inferredType);
+            meta.setElasticType(inferredType);
         }
     }
 

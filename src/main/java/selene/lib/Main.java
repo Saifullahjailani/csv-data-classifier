@@ -3,7 +3,6 @@ package selene.lib;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import selene.lib.category.CSVCategorizer;
-import selene.lib.category.manual.ColumnNameProcessor;
 import selene.lib.category.type.ClassificationResult;
 import selene.lib.elastic.ElasticsearchMappingGenerator;
 
@@ -17,202 +16,96 @@ import java.util.*;
 public class Main {
 
     private static final String VERSION = "1.0.0";
+    private static final ObjectMapper mapper = new ObjectMapper()
+            .enable(SerializationFeature.INDENT_OUTPUT);
 
     public static void main(String[] args) {
-        if (args.length == 0) {
+        if (args.length == 0 || args[0].equals("-h") || args[0].equals("--help")) {
             printUsage();
-            System.exit(1);
-        }
-
-        // Parse command line arguments
-        CliOptions options = parseArguments(args);
-
-        if (options.showHelp) {
-            printUsage();
+            System.exit(args.length == 0 ? 1 : 0);
             return;
         }
 
-        if (options.showVersion) {
-            System.out.println("CSV Data Classifier v" + VERSION);
+        if (args[0].equals("-v") || args[0].equals("--version")) {
+            System.out.println("csv-classifier " + VERSION);
             return;
-        }
-
-        if (options.inputFile == null) {
-            System.err.println("Error: No input file specified");
-            printUsage();
-            System.exit(1);
         }
 
         try {
-            processFile(options);
+            CliOptions options = parseArguments(args);
+            String output = processFile(options);
+            writeOutput(output, options.outputFile);
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
-            if (options.verbose) {
-                e.printStackTrace();
-            }
             System.exit(1);
         }
     }
 
-    private static void processFile(CliOptions options) throws IOException {
+    private static String processFile(CliOptions options) throws IOException {
         Path inputPath = Path.of(options.inputFile);
         if (!Files.exists(inputPath)) {
             throw new IOException("File not found: " + options.inputFile);
         }
 
-        if (options.verbose) {
-            System.out.println("Processing file: " + options.inputFile);
-        }
-
-        // Create categorizer and process
         CSVCategorizer categorizer = new CSVCategorizer(options.inputFile);
-        Map<String, ColumnNameProcessor.ColumnMetaData> results = categorizer.categorize();
-        List<ClassificationResult> classificationResults = categorizer.getClassificationResults();
+        categorizer.categorize();
+        List<ClassificationResult> results = categorizer.getClassificationResults();
 
-        // Output results based on format
-        String output;
-        switch (options.outputFormat.toLowerCase()) {
-            case "json":
-                output = formatAsJson(classificationResults, categorizer, options.verbose);
-                break;
-            case "csv":
-                output = formatAsCsv(classificationResults);
-                break;
-            case "es-mapping":
-            case "elasticsearch":
-            case "elastic":
-                output = formatAsElasticsearchMapping(classificationResults, options);
-                break;
-            case "table":
-            default:
-                output = formatAsTable(classificationResults, categorizer, options.verbose);
-                break;
-        }
-
-        // Write to file or stdout
-        if (options.outputFile != null) {
-            try (PrintWriter writer = new PrintWriter(new FileWriter(options.outputFile))) {
-                writer.print(output);
-            }
-            if (options.verbose) {
-                System.out.println("Results written to: " + options.outputFile);
-            }
-        } else {
-            System.out.print(output);
-        }
+        return switch (options.format) {
+            case "es-mapping", "mapping" -> generateEsMapping(results, options);
+            default -> generateJson(results, categorizer);
+        };
     }
 
-    private static String formatAsJson(List<ClassificationResult> results, CSVCategorizer categorizer, boolean verbose) {
+    private static String generateJson(List<ClassificationResult> results, CSVCategorizer categorizer) {
         try {
-            ObjectMapper mapper = new ObjectMapper();
-            mapper.enable(SerializationFeature.INDENT_OUTPUT);
-
             Map<String, Object> output = new LinkedHashMap<>();
-            output.put("version", VERSION);
-            output.put("summary", Map.of(
-                    "rowCount", categorizer.getRowCount(),
-                    "columnCount", categorizer.getColumnCount()
-            ));
+            output.put("rowCount", categorizer.getRowCount());
+            output.put("columnCount", categorizer.getColumnCount());
 
             List<Map<String, Object>> columns = new ArrayList<>();
             for (ClassificationResult result : results) {
                 Map<String, Object> col = new LinkedHashMap<>();
                 col.put("name", result.getColumnName());
-                col.put("elasticType", result.getType().name());
+                col.put("type", result.getType().name());
                 col.put("categories", result.getCategories());
                 columns.add(col);
             }
             output.put("columns", columns);
 
-            return mapper.writeValueAsString(output) + "\n";
+            return mapper.writeValueAsString(output);
         } catch (Exception e) {
-            return "{\"error\": \"" + e.getMessage() + "\"}\n";
+            return "{\"error\": \"" + e.getMessage() + "\"}";
         }
     }
 
-    private static String formatAsCsv(List<ClassificationResult> results) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("column_name,elastic_type,categories\n");
-
-        for (ClassificationResult result : results) {
-            sb.append(escapeCsv(result.getColumnName())).append(",");
-            sb.append(result.getType().name()).append(",");
-            sb.append(escapeCsv(String.join(";", result.getCategories()))).append("\n");
-        }
-
-        return sb.toString();
-    }
-
-    private static String formatAsElasticsearchMapping(List<ClassificationResult> results, CliOptions options) {
+    private static String generateEsMapping(List<ClassificationResult> results, CliOptions options) {
         try {
-            ObjectMapper mapper = new ObjectMapper();
-            mapper.enable(SerializationFeature.INDENT_OUTPUT);
-
-            // Configure mapping options
             ElasticsearchMappingGenerator.MappingOptions mappingOptions =
                 ElasticsearchMappingGenerator.MappingOptions.defaults()
-                    .withShards(options.esShards)
-                    .withReplicas(options.esReplicas)
-                    .withDynamicMapping(options.esDynamic)
-                    .withMetadata(options.esIncludeMetadata);
+                    .withShards(options.shards)
+                    .withReplicas(options.replicas);
 
-            // Generate mapping
             ElasticsearchMappingGenerator generator = new ElasticsearchMappingGenerator(
-                options.esIndexName,
+                options.indexName,
                 results,
                 mappingOptions
             );
 
-            Map<String, Object> mapping = generator.generateMapping();
-
-            return mapper.writeValueAsString(mapping) + "\n";
+            return mapper.writeValueAsString(generator.generateMapping());
         } catch (Exception e) {
-            return "{\"error\": \"" + e.getMessage() + "\"}\n";
+            return "{\"error\": \"" + e.getMessage() + "\"}";
         }
     }
 
-    private static String formatAsTable(List<ClassificationResult> results, CSVCategorizer categorizer, boolean verbose) {
-        StringBuilder sb = new StringBuilder();
-
-        // Header
-        sb.append("╔══════════════════════════════════════════════════════════════════════════════╗\n");
-        sb.append("║                         CSV DATA CLASSIFIER RESULTS                          ║\n");
-        sb.append("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        // Summary
-        sb.append(String.format("║  Rows: %-10d  Columns: %-10d                                    ║\n",
-                categorizer.getRowCount(), categorizer.getColumnCount()));
-        sb.append("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        // Column details header
-        sb.append("║  COLUMN NAME              │  ELASTIC TYPE       │  CATEGORIES                ║\n");
-        sb.append("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        for (ClassificationResult result : results) {
-            String name = truncate(result.getColumnName(), 23);
-            String type = truncate(result.getType().name(), 17);
-            String categories = truncate(String.join(", ", result.getCategories()), 25);
-
-            sb.append(String.format("║  %-23s │  %-17s │  %-25s ║\n", name, type, categories));
+    private static void writeOutput(String output, String outputFile) throws IOException {
+        if (outputFile != null) {
+            try (PrintWriter writer = new PrintWriter(new FileWriter(outputFile))) {
+                writer.println(output);
+            }
+        } else {
+            System.out.println(output);
         }
-
-        sb.append("╚══════════════════════════════════════════════════════════════════════════════╝\n");
-
-        return sb.toString();
-    }
-
-    private static String truncate(String str, int maxLen) {
-        if (str == null) return "";
-        if (str.length() <= maxLen) return str;
-        return str.substring(0, maxLen - 3) + "...";
-    }
-
-    private static String escapeCsv(String value) {
-        if (value == null) return "";
-        if (value.contains(",") || value.contains("\"") || value.contains("\n")) {
-            return "\"" + value.replace("\"", "\"\"") + "\"";
-        }
-        return value;
     }
 
     private static CliOptions parseArguments(String[] args) {
@@ -220,68 +113,28 @@ public class Main {
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
-
             switch (arg) {
-                case "-h":
-                case "--help":
-                    options.showHelp = true;
-                    break;
-                case "-v":
-                case "--version":
-                    options.showVersion = true;
-                    break;
-                case "--verbose":
-                    options.verbose = true;
-                    break;
-                case "-f":
-                case "--format":
-                    if (i + 1 < args.length) {
-                        options.outputFormat = args[++i];
-                    }
-                    break;
-                case "-o":
-                case "--output":
-                    if (i + 1 < args.length) {
-                        options.outputFile = args[++i];
-                    }
-                    break;
-                case "--index-name":
-                case "-i":
-                    if (i + 1 < args.length) {
-                        options.esIndexName = args[++i];
-                    }
-                    break;
-                case "--shards":
-                    if (i + 1 < args.length) {
-                        options.esShards = Integer.parseInt(args[++i]);
-                    }
-                    break;
-                case "--replicas":
-                    if (i + 1 < args.length) {
-                        options.esReplicas = Integer.parseInt(args[++i]);
-                    }
-                    break;
-                case "--dynamic":
-                    options.esDynamic = true;
-                    break;
-                case "--no-metadata":
-                    options.esIncludeMetadata = false;
-                    break;
-                default:
-                    if (!arg.startsWith("-") && options.inputFile == null) {
+                case "-f", "--format" -> options.format = args[++i];
+                case "-o", "--output" -> options.outputFile = args[++i];
+                case "-i", "--index" -> options.indexName = args[++i];
+                case "--shards" -> options.shards = Integer.parseInt(args[++i]);
+                case "--replicas" -> options.replicas = Integer.parseInt(args[++i]);
+                default -> {
+                    if (!arg.startsWith("-")) {
                         options.inputFile = arg;
                     }
-                    break;
+                }
             }
         }
 
-        // Derive index name from input file if not specified
-        if (options.esIndexName == null && options.inputFile != null) {
+        if (options.inputFile == null) {
+            throw new IllegalArgumentException("No input file specified");
+        }
+
+        // Derive index name from filename if not specified
+        if (options.indexName == null) {
             String fileName = Path.of(options.inputFile).getFileName().toString();
-            options.esIndexName = fileName
-                .replaceAll("\\.csv$", "")
-                .toLowerCase()
-                .replaceAll("[^a-z0-9]", "_");
+            options.indexName = fileName.replaceAll("\\.csv$", "").toLowerCase().replaceAll("[^a-z0-9]", "_");
         }
 
         return options;
@@ -289,79 +142,45 @@ public class Main {
 
     private static void printUsage() {
         System.out.println("""
-                CSV Data Classifier - Automatic CSV Column Classification Tool
+            CSV Data Classifier - Analyze CSV columns and generate Elasticsearch mappings
 
-                USAGE:
-                    csv-classifier [OPTIONS] <input-file>
+            USAGE:
+                csv-classifier <file.csv> [options]
 
-                ARGUMENTS:
-                    <input-file>            Path to the CSV file to analyze
+            OPTIONS:
+                -f, --format <json|es-mapping>   Output format (default: json)
+                -o, --output <file>              Write to file instead of stdout
+                -i, --index <name>               Elasticsearch index name
+                --shards <n>                     Number of shards (default: 1)
+                --replicas <n>                   Number of replicas (default: 1)
+                -h, --help                       Show this help
+                -v, --version                    Show version
 
-                OPTIONS:
-                    -h, --help              Show this help message
-                    -v, --version           Show version information
-                    --verbose               Enable verbose output
-                    -f, --format <FORMAT>   Output format: table (default), json, csv, es-mapping
-                    -o, --output <FILE>     Write output to file instead of stdout
+            EXAMPLES:
+                csv-classifier data.csv                     # Analyze and output JSON
+                csv-classifier data.csv -f es-mapping       # Generate ES mapping
+                csv-classifier data.csv -o result.json      # Save to file
+                csv-classifier data.csv -f es-mapping -i my_index --shards 3
 
-                ELASTICSEARCH MAPPING OPTIONS (use with -f es-mapping):
-                    -i, --index-name <NAME> Elasticsearch index name (default: derived from filename)
-                    --shards <N>            Number of primary shards (default: 1)
-                    --replicas <N>          Number of replicas (default: 1)
-                    --dynamic               Enable dynamic mapping (default: strict)
-                    --no-metadata           Don't include category metadata in mappings
+            COLUMN ANNOTATIONS:
+                Column names can include type and category hints:
+                  type[INTEGER]cat[index,id]MyColumn
 
-                EXAMPLES:
-                    csv-classifier data.csv
-                    csv-classifier -f json data.csv
-                    csv-classifier -f json -o results.json data.csv
-                    csv-classifier --verbose -f csv data.csv > report.csv
+                Supported types: TEXT, KEYWORD, INTEGER, LONG, FLOAT, DOUBLE,
+                                 BOOLEAN, DATE, IP, GEO_POINT
 
-                    # Generate Elasticsearch mapping
-                    csv-classifier -f es-mapping data.csv
-                    csv-classifier -f es-mapping -i my_index --shards 3 --replicas 2 data.csv
-                    csv-classifier -f es-mapping -o mapping.json data.csv
-
-                OUTPUT FORMATS:
-                    table       - Human-readable ASCII table (default)
-                    json        - JSON format with full metadata
-                    csv         - CSV format for further processing
-                    es-mapping  - Elasticsearch index mapping with analyzers
-
-                DETECTED CATEGORIES:
-                    - PII: email, phone, ssn, credit-card, name, address, etc.
-                    - Crypto: hash, bitcoin, ethereum, and 50+ blockchain addresses
-                    - Custom: gender, job-title, index, id
-
-                ELASTICSEARCH ANALYZERS (auto-configured based on detected categories):
-                    - email_analyzer      : For email addresses with domain extraction
-                    - name_analyzer       : For person names with autocomplete support
-                    - phone_analyzer      : For phone numbers (digits only)
-                    - address_analyzer    : For street addresses with synonyms
-                    - pii_analyzer        : For sensitive data (SSN, credit cards)
-                    - autocomplete_analyzer: For search-as-you-type fields
-
-                ELASTICSEARCH TYPES:
-                    TEXT, KEYWORD, INTEGER, LONG, FLOAT, DOUBLE, BOOLEAN,
-                    DATE, IP, GEO_POINT, and more
-
-                For more information, visit: https://github.com/selene/csv-data-classifier
-                """);
+                Supported categories: email-address, phone-number, ssn, credit-card,
+                                      first-name, surname, city, state, zip-code,
+                                      gender, job-title, index, id, hash, etc.
+            """);
     }
 
     private static class CliOptions {
         String inputFile;
         String outputFile;
-        String outputFormat = "table";
-        boolean showHelp = false;
-        boolean showVersion = false;
-        boolean verbose = false;
-
-        // Elasticsearch mapping options
-        String esIndexName;
-        int esShards = 1;
-        int esReplicas = 1;
-        boolean esDynamic = false;
-        boolean esIncludeMetadata = true;
+        String format = "json";
+        String indexName;
+        int shards = 1;
+        int replicas = 1;
     }
 }
