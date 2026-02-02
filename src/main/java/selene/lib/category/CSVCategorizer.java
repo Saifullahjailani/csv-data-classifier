@@ -6,13 +6,17 @@ import selene.lib.category.gender.GenderDetector;
 import selene.lib.category.manual.ColumnNameProcessor;
 import selene.lib.category.pii.PIIDetector;
 import selene.lib.category.title.JobTitleDetector;
+import selene.lib.category.type.ClassificationResult;
 import selene.lib.type.ElasticTypes;
+import selene.lib.type.TypeDetector;
 import tech.tablesaw.api.*;
 import tech.tablesaw.io.csv.CsvReadOptions;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 public class CSVCategorizer {
     private final Table csv;
@@ -29,11 +33,12 @@ public class CSVCategorizer {
 
     public CSVCategorizer (String pathString) throws RuntimeException {
         Path path = Path.of(pathString);
-        if(!path.endsWith("csv")){
-            throw new RuntimeException("Invalid file type");
+        String fileName = path.getFileName().toString().toLowerCase();
+        if(!fileName.endsWith(".csv")){
+            throw new RuntimeException("Invalid file type: expected .csv file");
         }
         if(!Files.exists(path)){
-            throw new RuntimeException("Invalid file type");
+            throw new RuntimeException("File not found: " + pathString);
         }
         this.csv = readCsv(pathString);
 
@@ -49,20 +54,22 @@ public class CSVCategorizer {
 
     }
 
-    public void categorize(){
+    public Map<String, ColumnNameProcessor.ColumnMetaData> categorize(){
         // Check if any of the columns is index
         for(int i = 0 ; i < csv.columnCount(); i ++){
             StringColumn column = csv.stringColumn(i);
+            var obj = columnsMetaData.get(column.name());
+
             if(isIndex(column)){
-                var obj = columnsMetaData.get(column.name());
                 obj.setElasticType(ElasticTypes.INTEGER);
                 obj.addCategory(CustomCategories.INDEX.getType());
-
             }
-            column = sampleColumn(column);
-            Set<String> preCategories = new HashSet<>(prePIIAnalysis(column));
+
+            StringColumn sampledColumn = sampleColumn(column);
+            Set<String> preCategories = new HashSet<>(prePIIAnalysis(sampledColumn));
+
             if(preCategories.isEmpty()){
-                String maxKey = detector.getFrequency(column).entrySet().stream()
+                String maxKey = detector.getFrequency(sampledColumn).entrySet().stream()
                         .max(Map.Entry.comparingByValue())
                         .map(Map.Entry::getKey)
                         .orElse("");
@@ -70,24 +77,69 @@ public class CSVCategorizer {
                     preCategories.add(maxKey.toLowerCase());
                 }
             }
-            var obj = columnsMetaData.get(column.name());
-            preCategories.forEach(obj::addCategory);
-            if(column.countMissing() == 0 && column.countUnique() == column.size()){
-                preCategories.add(CustomCategories.ID.getType());
-            }
 
+            preCategories.forEach(obj::addCategory);
+
+            // Check if all values are unique (potential ID column)
+            if(sampledColumn.countMissing() == 0 && sampledColumn.countUnique() == sampledColumn.size()){
+                obj.addCategory(CustomCategories.ID.getType());
+            }
         }
+
+        // Infer elastic types after categorization
+        inferElasticTypes();
+
+        return columnsMetaData;
     }
 
     public void inferElasticTypes(){
-        // fixme infer the ElasticType based on the following things
-        // Category
-        // Table Name if exists
-        // The data in that column
+        for(int i = 0; i < csv.columnCount(); i++){
+            StringColumn column = csv.stringColumn(i);
+            var obj = columnsMetaData.get(column.name());
+
+            // Skip if type already set (e.g., index columns)
+            if(obj.getElasticType() != null && obj.getElasticType() != ElasticTypes.UNKNOWN){
+                continue;
+            }
+
+            // Get column values for type inference
+            List<String> columnValues = StreamSupport.stream(column.spliterator(), false)
+                    .limit(SAMPLE_SIZE)
+                    .collect(Collectors.toList());
+
+            ElasticTypes inferredType = TypeDetector.inferColumnType(
+                    obj.getCategory(),
+                    columnValues
+            );
+
+            obj.setElasticType(inferredType);
+        }
+    }
+
+    public List<ClassificationResult> getClassificationResults(){
+        return columnsMetaData.values().stream()
+                .map(meta -> ClassificationResult.builder()
+                        .columnName(meta.getColumnName())
+                        .categories(new ArrayList<>(meta.getCategory()))
+                        .type(meta.getElasticType())
+                        .build())
+                .collect(Collectors.toList());
+    }
+
+    public int getRowCount(){
+        return csv.rowCount();
+    }
+
+    public int getColumnCount(){
+        return csv.columnCount();
+    }
+
+    public List<String> getColumnNames(){
+        return csv.columnNames();
     }
 
     private boolean isIndex(StringColumn column){
-        column = getNotMisingRandomContiguousBlock(column);
+        column = getNotMissingRandomContiguousBlock(column);
         try {
             DoubleColumn col = column.parseDouble();
             double confidence = indexConfidence(col);
@@ -162,14 +214,13 @@ public class CSVCategorizer {
         return col;
     }
 
-    private StringColumn getNotMisingRandomContiguousBlock(StringColumn column){
-
+    private StringColumn getNotMissingRandomContiguousBlock(StringColumn column){
         if(SAMPLE_SIZE > column.size()){
-            return column;
+            return column.removeMissing();
         }
         int maxStart = column.size() - SAMPLE_SIZE;
-        int start = random.nextInt(maxStart);
-        return column.inRange(start, start + 1).removeMissing();
+        int start = random.nextInt(maxStart + 1);
+        return column.inRange(start, start + SAMPLE_SIZE).removeMissing();
     }
 
     private static List<String> prePIIAnalysis(StringColumn column){

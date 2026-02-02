@@ -17,8 +17,9 @@ public class TypeDetector {
     private static final double TYPE_CONFIDENCE_THRESHOLD = 0.8; // 80% of non-null values must match
 
     private static final Set<String> PII_CATEGORIES = Arrays.stream(FilterType.values()).map(FilterType::getType).map(String::toLowerCase).collect(Collectors.toSet());
-    private static final Set<String> Crypto_CTEGORIES = Arrays.stream(CryptoType.values()).map(CryptoType::getName).map(String::toLowerCase).collect(Collectors.toSet());
-    private static final Set<String> Custom_CTEGORIES = Arrays.stream(CustomCategories.values()).map(CustomCategories::getType).map(String::toLowerCase).collect(Collectors.toSet());
+    private static final Set<String> CRYPTO_CATEGORIES = Arrays.stream(CryptoType.values()).map(CryptoType::getName).map(String::toLowerCase).collect(Collectors.toSet());
+    private static final Set<String> CUSTOM_CATEGORIES = Arrays.stream(CustomCategories.values()).map(CustomCategories::getType).map(String::toLowerCase).collect(Collectors.toSet());
+    private static final Map<String, FilterType> PII_CATEGORY_MAP = Arrays.stream(FilterType.values()).collect(Collectors.toMap(f -> f.getType().toLowerCase(), f -> f, (a, b) -> a));
 
 
 
@@ -82,22 +83,23 @@ public class TypeDetector {
 
     private static ElasticTypes getElasticType(String category){
         category = category.trim().toLowerCase();
-        if(Crypto_CTEGORIES.contains(category)){
+        if(CRYPTO_CATEGORIES.contains(category)){
             return ElasticTypes.KEYWORD;
         }
-        if(Custom_CTEGORIES.contains(category)){
-            try {
-                CustomCategories categories = CustomCategories.valueOf(category);
-                return categories.getElasticTypes();
-            } catch (Exception _){
-
+        if(CUSTOM_CATEGORIES.contains(category)){
+            for (CustomCategories cat : CustomCategories.values()) {
+                if (cat.getType().equalsIgnoreCase(category)) {
+                    return cat.getElasticTypes();
+                }
             }
         }
-        ElasticTypes type = ElasticTypes.UNKNOWN;
         if(PII_CATEGORIES.contains(category)){
-            type = getElasticType(category);
+            FilterType filterType = PII_CATEGORY_MAP.get(category);
+            if (filterType != null) {
+                return getElasticType(filterType);
+            }
         }
-        return type;
+        return ElasticTypes.UNKNOWN;
     }
 
 
@@ -158,7 +160,7 @@ public class TypeDetector {
             if (BOOLEAN_PATTERN.matcher(trimmed).matches()) {
                 types.add(ElasticTypes.BOOLEAN);
             } else if (INTEGER_PATTERN.matcher(trimmed).matches()) {
-                types.add(ElasticTypes.BOOLEAN);
+                types.add(ElasticTypes.INTEGER);
             } else if (FLOAT_PATTERN.matcher(trimmed).matches()) {
                 types.add(ElasticTypes.FLOAT);
             }

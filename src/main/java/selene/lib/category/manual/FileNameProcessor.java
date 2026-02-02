@@ -53,8 +53,8 @@ public class FileNameProcessor {
             }
          }
 
-        String acctualFilename = matcher.replaceFirst("");
-        builder.fileName(acctualFilename);
+        String actualFilename = matcher.replaceFirst("");
+        builder.fileName(actualFilename);
 
         return builder.build();
     }

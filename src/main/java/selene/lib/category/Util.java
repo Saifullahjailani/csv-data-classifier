@@ -10,12 +10,12 @@ import java.util.List;
 public class Util {
 
     public static List<String> getAllValidCategories(){
-        List<String> cateories = new ArrayList<>();
-       cateories.addAll(Arrays.stream(FilterType.values()).map(FilterType::getType).toList());
+        List<String> categories = new ArrayList<>();
+       categories.addAll(Arrays.stream(FilterType.values()).map(FilterType::getType).toList());
 
-        cateories.addAll(Arrays.stream(CryptoType.values()).map(CryptoType::getName).toList());
-        cateories.addAll(Arrays.stream(CustomCategories.values()).map(CustomCategories::getType).toList());
-        return cateories;
+        categories.addAll(Arrays.stream(CryptoType.values()).map(CryptoType::getName).toList());
+        categories.addAll(Arrays.stream(CustomCategories.values()).map(CustomCategories::getType).toList());
+        return categories;
     }
 
     public static boolean isValidCategory(String str){
