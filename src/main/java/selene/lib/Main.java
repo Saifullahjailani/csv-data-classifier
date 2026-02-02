@@ -3,6 +3,9 @@ package selene.lib;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import selene.lib.category.CSVCategorizer;
+import selene.lib.category.manual.ColumnNameProcessor;
+import selene.lib.category.manual.FileMetaData;
+import selene.lib.category.manual.FileNameProcessor;
 import selene.lib.category.type.ClassificationResult;
 import selene.lib.elastic.ElasticsearchMappingGenerator;
 
@@ -47,31 +50,60 @@ public class Main {
             throw new IOException("File not found: " + options.inputFile);
         }
 
+        // Get file metadata from filename
+        String fileName = inputPath.getFileName().toString();
+        FileMetaData fileMeta = FileNameProcessor.getMetaData(fileName);
+
+        // Process CSV
         CSVCategorizer categorizer = new CSVCategorizer(options.inputFile);
         categorizer.categorize();
         List<ClassificationResult> results = categorizer.getClassificationResults();
 
         return switch (options.format) {
-            case "es-mapping", "mapping" -> generateEsMapping(results, options);
-            default -> generateJson(results, categorizer);
+            case "csv" -> generateAnnotatedCsv(results, fileMeta, categorizer);
+            default -> generateJson(results, categorizer, fileMeta);
         };
     }
 
-    private static String generateJson(List<ClassificationResult> results, CSVCategorizer categorizer) {
+    private static String generateJson(List<ClassificationResult> results, CSVCategorizer categorizer, FileMetaData fileMeta) {
         try {
             Map<String, Object> output = new LinkedHashMap<>();
-            output.put("rowCount", categorizer.getRowCount());
-            output.put("columnCount", categorizer.getColumnCount());
 
-            List<Map<String, Object>> columns = new ArrayList<>();
-            for (ClassificationResult result : results) {
-                Map<String, Object> col = new LinkedHashMap<>();
-                col.put("name", result.getColumnName());
-                col.put("type", result.getType().name());
-                col.put("categories", result.getCategories());
-                columns.add(col);
-            }
-            output.put("columns", columns);
+            // File metadata
+            Map<String, Object> file = new LinkedHashMap<>();
+            file.put("fileName", fileMeta.getFileName());
+            file.put("displayName", fileMeta.getDisplayName());
+            file.put("loader", fileMeta.getLoader());
+            if (fileMeta.getTotalRows() != null) file.put("totalRows", fileMeta.getTotalRows());
+            if (fileMeta.getIdColumnName() != null) file.put("idColumnName", fileMeta.getIdColumnName());
+            if (fileMeta.getCaseId() != null) file.put("caseId", fileMeta.getCaseId());
+            if (fileMeta.getMd5() != null) file.put("md5", fileMeta.getMd5());
+            if (fileMeta.getSection() != null) file.put("section", fileMeta.getSection());
+            output.put("file", file);
+
+            // Column names list
+            List<String> columnNames = results.stream().map(ClassificationResult::getColumnName).toList();
+            output.put("columns", columnNames);
+
+            // ES settings and mappings (without category metadata)
+            ElasticsearchMappingGenerator.MappingOptions mappingOptions =
+                ElasticsearchMappingGenerator.MappingOptions.defaults()
+                    .withShards(fileMeta.getNumberOfShards())
+                    .withReplicas(fileMeta.getNumberOfReplicas())
+                    .withMetadata(false);  // No category metadata in mapping
+
+            ElasticsearchMappingGenerator generator = new ElasticsearchMappingGenerator(
+                fileMeta.getElasticIndexName(),
+                results,
+                mappingOptions
+            );
+
+            Map<String, Object> esMapping = generator.generateMapping();
+            output.put("elasticsearch", Map.of(
+                "indexName", fileMeta.getElasticIndexName(),
+                "settings", esMapping.get("settings"),
+                "mappings", esMapping.get("mappings")
+            ));
 
             return mapper.writeValueAsString(output);
         } catch (Exception e) {
@@ -79,23 +111,33 @@ public class Main {
         }
     }
 
-    private static String generateEsMapping(List<ClassificationResult> results, CliOptions options) {
-        try {
-            ElasticsearchMappingGenerator.MappingOptions mappingOptions =
-                ElasticsearchMappingGenerator.MappingOptions.defaults()
-                    .withShards(options.shards)
-                    .withReplicas(options.replicas);
+    private static String generateAnnotatedCsv(List<ClassificationResult> results, FileMetaData fileMeta, CSVCategorizer categorizer) {
+        StringBuilder sb = new StringBuilder();
 
-            ElasticsearchMappingGenerator generator = new ElasticsearchMappingGenerator(
-                options.indexName,
-                results,
-                mappingOptions
-            );
+        // Generate annotated filename
+        String annotatedFileName = String.format(
+            "[loader=%s,elastic_index_name=%s,elastic_shards=%d,elastic_replicas=%d,display_name=%s]%s",
+            fileMeta.getLoader(),
+            fileMeta.getElasticIndexName(),
+            fileMeta.getNumberOfShards(),
+            fileMeta.getNumberOfReplicas(),
+            fileMeta.getDisplayName(),
+            fileMeta.getFileName()
+        );
+        sb.append("# Annotated filename: ").append(annotatedFileName).append("\n");
 
-            return mapper.writeValueAsString(generator.generateMapping());
-        } catch (Exception e) {
-            return "{\"error\": \"" + e.getMessage() + "\"}";
+        // Generate annotated column headers
+        List<String> annotatedColumns = new ArrayList<>();
+        for (ClassificationResult result : results) {
+            String colName = result.getColumnName();
+            String type = result.getType().name();
+            String cats = String.join(",", result.getCategories());
+            String annotated = String.format("type[%s]cat[%s]%s", type, cats, colName);
+            annotatedColumns.add(annotated);
         }
+        sb.append(String.join(",", annotatedColumns));
+
+        return sb.toString();
     }
 
     private static void writeOutput(String output, String outputFile) throws IOException {
@@ -116,9 +158,6 @@ public class Main {
             switch (arg) {
                 case "-f", "--format" -> options.format = args[++i];
                 case "-o", "--output" -> options.outputFile = args[++i];
-                case "-i", "--index" -> options.indexName = args[++i];
-                case "--shards" -> options.shards = Integer.parseInt(args[++i]);
-                case "--replicas" -> options.replicas = Integer.parseInt(args[++i]);
                 default -> {
                     if (!arg.startsWith("-")) {
                         options.inputFile = arg;
@@ -131,47 +170,36 @@ public class Main {
             throw new IllegalArgumentException("No input file specified");
         }
 
-        // Derive index name from filename if not specified
-        if (options.indexName == null) {
-            String fileName = Path.of(options.inputFile).getFileName().toString();
-            options.indexName = fileName.replaceAll("\\.csv$", "").toLowerCase().replaceAll("[^a-z0-9]", "_");
-        }
-
         return options;
     }
 
     private static void printUsage() {
         System.out.println("""
-            CSV Data Classifier - Analyze CSV columns and generate Elasticsearch mappings
+            CSV Data Classifier - Analyze CSV and generate Elasticsearch mappings
 
             USAGE:
                 csv-classifier <file.csv> [options]
 
             OPTIONS:
-                -f, --format <json|es-mapping>   Output format (default: json)
-                -o, --output <file>              Write to file instead of stdout
-                -i, --index <name>               Elasticsearch index name
-                --shards <n>                     Number of shards (default: 1)
-                --replicas <n>                   Number of replicas (default: 1)
-                -h, --help                       Show this help
-                -v, --version                    Show version
+                -f, --format <json|csv>   Output format (default: json)
+                -o, --output <file>       Write to file instead of stdout
+                -h, --help                Show this help
+                -v, --version             Show version
+
+            OUTPUT FORMATS:
+                json  - Complete JSON with file metadata, columns, and ES mapping
+                csv   - Annotated column headers with type/category metadata
 
             EXAMPLES:
-                csv-classifier data.csv                     # Analyze and output JSON
-                csv-classifier data.csv -f es-mapping       # Generate ES mapping
-                csv-classifier data.csv -o result.json      # Save to file
-                csv-classifier data.csv -f es-mapping -i my_index --shards 3
+                csv-classifier data.csv                  # Full JSON output
+                csv-classifier data.csv -o result.json   # Save to file
+                csv-classifier data.csv -f csv           # Annotated CSV headers
 
-            COLUMN ANNOTATIONS:
-                Column names can include type and category hints:
-                  type[INTEGER]cat[index,id]MyColumn
+            FILE METADATA (in filename):
+                [loader=csv,elastic_shards=3,display_name=My Data]data.csv
 
-                Supported types: TEXT, KEYWORD, INTEGER, LONG, FLOAT, DOUBLE,
-                                 BOOLEAN, DATE, IP, GEO_POINT
-
-                Supported categories: email-address, phone-number, ssn, credit-card,
-                                      first-name, surname, city, state, zip-code,
-                                      gender, job-title, index, id, hash, etc.
+            COLUMN ANNOTATIONS (in column names):
+                type[INTEGER]cat[index,id]MyColumn
             """);
     }
 
@@ -179,8 +207,5 @@ public class Main {
         String inputFile;
         String outputFile;
         String format = "json";
-        String indexName;
-        int shards = 1;
-        int replicas = 1;
     }
 }
