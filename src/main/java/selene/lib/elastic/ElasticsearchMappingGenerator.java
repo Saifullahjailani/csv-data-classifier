@@ -88,19 +88,6 @@ public class ElasticsearchMappingGenerator {
             "filter", List.of("lowercase", "asciifolding", "address_synonym_filter")
         ));
 
-        // Autocomplete analyzer for search-as-you-type
-        analyzers.put("autocomplete_analyzer", Map.of(
-            "type", "custom",
-            "tokenizer", "autocomplete_tokenizer",
-            "filter", List.of("lowercase")
-        ));
-
-        analyzers.put("autocomplete_search_analyzer", Map.of(
-            "type", "custom",
-            "tokenizer", "standard",
-            "filter", List.of("lowercase")
-        ));
-
         // PII masking analyzer (for sensitive data that needs partial matching)
         analyzers.put("pii_analyzer", Map.of(
             "type", "custom",
@@ -109,16 +96,6 @@ public class ElasticsearchMappingGenerator {
         ));
 
         analysis.put("analyzer", analyzers);
-
-        // Custom tokenizers
-        Map<String, Object> tokenizers = new LinkedHashMap<>();
-        tokenizers.put("autocomplete_tokenizer", Map.of(
-            "type", "edge_ngram",
-            "min_gram", 2,
-            "max_gram", 20,
-            "token_chars", List.of("letter", "digit")
-        ));
-        analysis.put("tokenizer", tokenizers);
 
         // Custom filters
         Map<String, Object> filters = new LinkedHashMap<>();
@@ -274,16 +251,6 @@ public class ElasticsearchMappingGenerator {
                 "type", "keyword",
                 "ignore_above", 256
             ));
-
-            // Add autocomplete sub-field for name fields
-            if (isNameField(categories)) {
-                fields.put("autocomplete", Map.of(
-                    "type", "text",
-                    "analyzer", "autocomplete_analyzer",
-                    "search_analyzer", "autocomplete_search_analyzer"
-                ));
-            }
-
             mapping.put("fields", fields);
         }
 
@@ -389,13 +356,6 @@ public class ElasticsearchMappingGenerator {
     }
 
     /**
-     * Checks if field is a name field that would benefit from autocomplete.
-     */
-    private boolean isNameField(List<String> categories) {
-        return containsAny(categories, "first-name", "surname", "name", "physician-name", "job-title");
-    }
-
-    /**
      * Utility method to check if categories contain any of the specified values.
      */
     private boolean containsAny(List<String> categories, String... values) {
@@ -413,7 +373,7 @@ public class ElasticsearchMappingGenerator {
     /**
      * Sanitizes field name to be valid Elasticsearch field name.
      */
-    private String sanitizeFieldName(String name) {
+    public static String sanitizeFieldName(String name) {
         if (name == null) return "unknown_field";
 
         // Remove or replace invalid characters
